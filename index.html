@@ -384,6 +384,8 @@ function normSettings(s){
     morning: Array.isArray(s.morning) ? s.morning : d.morning,
     goalWeight: typeof s.goalWeight === 'number' && s.goalWeight > 0 ? s.goalWeight : null,
     quotes: Array.isArray(s.quotes) ? s.quotes.filter(q => typeof q === 'string') : d.quotes,
+    // Weekly reviews only count weeks whose Sunday falls on or after this date.
+    reviewFrom: /^\d{4}-\d{2}-\d{2}$/.test(s.reviewFrom || '') ? s.reviewFrom : '2026-09-29',
     quits: Array.isArray(s.quits) ? s.quits : d.quits
   };
 }
@@ -510,7 +512,7 @@ function readImportFile(file){
   r.onerror = () => toast('Couldn\'t read that file.');
   r.readAsText(file);
 }
-async function applyImport(b){
+async function applyImport(b, doneMsg){
   const oldKeys = Object.keys(state.days);
   state.settings = normSettings(b.settings);
   state.days = b.days;
@@ -530,7 +532,25 @@ async function applyImport(b){
     setSync(failed ? 'error' : 'synced');
     if(failed){ toast('Restored on this device, but some days didn\'t sync. Reopen the app to retry.'); render(); return; }
   }
-  toast('Backup restored: '+n+' day'+(n === 1 ? '' : 's')+'.'); render();
+  toast(doneMsg || 'Backup restored: '+n+' day'+(n === 1 ? '' : 's')+'.'); render();
+}
+function startOver(){
+  // Keeps your setup (targets, routine, habits, quotes). Clears every logged day and restarts quit counters at day 0.
+  const t = todayKey(), s = clone(state.settings);
+  s.quits = s.quits.map(q => Object.assign({}, q, {since:t, best:0}));
+  s.reviewFrom = t;
+  const photoIds = [];
+  Object.values(state.days).forEach(d => (d.photos || []).forEach(p => photoIds.push(p.id)));
+  if(assets) photoIds.forEach(id => assets.delete(id).catch(() => {}));
+  state.pending = null; state.review = null; state.date = t;
+  applyImport({settings:s, days:{}}, 'Fresh start. Everything is back to 0.');
+}
+function resetCard(){
+  const n = Object.keys(state.days).length;
+  let b = '<p class="empty">Clears every logged day, XP, streaks, weight, sleep, water and progress photos, and puts your quit counters back to day 0. Keeps your targets, morning routine, habit list and motivation lines.</p>';
+  if(state.pending === 'reset') b += '<p><b>Erase '+n+' logged day'+(n === 1 ? '' : 's')+'?</b> This can\'t be undone unless you saved a backup.</p><div class="row2"><button class="mini danger" data-act="reset-yes">Yes, start over</button><button class="mini" data-act="cancel">Cancel</button></div>';
+  else b += '<button class="mini ghost" data-act="reset-ask">Start over from 0</button>';
+  return card('var(--red)', 'Start over', '', false, b);
 }
 function backupCard(){
   const lb = lastBackup(), t = todayKey(), ago = lb ? daysBetween(lb, t) : null, nDays = Object.keys(state.days).length;
@@ -815,7 +835,7 @@ function doAct(a, v, el){
     case 'quit-rm': mutS(s => { s.quits = s.quits.filter(q => q.id !== v); }); state.pending = null; break;
     case 'morn': { const was = !!getDay(k).morning[v]; mut(k, d => { if(d.morning[v]) delete d.morning[v]; else d.morning[v] = true; }); if(!was && mornFull(getDay(k))) toast('Morning locked in. Now load the plates.'); break; }
     case 'review': state.view = 'review'; state.reviewWeek = v; state.pending = null; render(); window.scrollTo(0,0); return;
-    case 'rv-prev': state.reviewWeek = addDays(state.reviewWeek || weekStart(todayKey()), -7); break;
+    case 'rv-prev': { const p = addDays(state.reviewWeek || weekStart(todayKey()), -7); if(sunOf(p) >= state.settings.reviewFrom) state.reviewWeek = p; break; }
     case 'rv-next': { const n = addDays(state.reviewWeek || weekStart(todayKey()), 7); if(n <= weekStart(todayKey())) state.reviewWeek = n; break; }
     case 'rv-done': { const was = getDay(k).rvDone; mut(k, d => { d.rvDone = !d.rvDone; }); if(!was) toast('Review locked in. +'+XP.review+' XP'); break; }
     case 'pose': state.pose = v; break;
@@ -856,6 +876,8 @@ function doAct(a, v, el){
     case 'quote-next': state.quoteOffset = (state.quoteOffset || 0) + 1; break;
     case 'quote-edit': state.editQuotes = !state.editQuotes; break;
     case 'quote-del': mutS(s => { s.quotes.splice(Number(v), 1); }); break;
+    case 'reset-ask': state.pending = 'reset'; break;
+    case 'reset-yes': startOver(); return;
     case 'export': exportBackup(); return;
     case 'copy-backup': copyBackup(); return;
     case 'import-paste': { const t = $('#import-text'), p = parseBackup(t ? t.value : ''); if(p.error){ toast(p.error); return; } state.pendingImport = p.backup; break; }
@@ -1500,7 +1522,7 @@ function reviewPrompt(){
   let ws = null, late = false;
   if(dow === 6) ws = weekStart(t);
   else if(dow === 0){ const prev = addDays(weekStart(t), -7); if(!getDay(sunOf(prev)).rvDone){ ws = prev; late = true; } }
-  if(!ws || getDay(sunOf(ws)).rvDone) return '';
+  if(!ws || getDay(sunOf(ws)).rvDone || sunOf(ws) < state.settings.reviewFrom) return '';
   let logged = false; for(let i = 0; i < 7; i++) if(state.days[addDays(ws, i)]) logged = true;
   if(!logged) return '';
   return card('var(--chalk)', late ? 'Missed review' : 'Sunday review', '+'+XP.review+' XP', false,
@@ -1518,7 +1540,7 @@ function viewReview(){
   const chev = d => '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="'+d+'" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const sign = n => (n >= 0 ? '+' : '')+n;
   let h = '<button class="link" style="align-self:flex-start" data-act="tab" data-v="today">← Back to today</button>';
-  h += '<div class="datebar"><button class="nav-btn" data-act="rv-prev" aria-label="Previous week">'+chev('M12.5 4l-6 6 6 6')+'</button>'
+  h += '<div class="datebar"><button class="nav-btn" data-act="rv-prev" aria-label="Previous week"'+(sunOf(addDays(ws, -7)) < state.settings.reviewFrom ? ' disabled' : '')+'>'+chev('M12.5 4l-6 6 6 6')+'</button>'
     + '<div class="date-mid"><div class="eyebrow">Weekly review</div><h1>'+fmtShort(ws)+' – '+fmtShort(sunK)+'</h1></div>'
     + '<button class="nav-btn" data-act="rv-next" aria-label="Next week"'+(ws >= weekStart(t) ? ' disabled' : '')+'>'+chev('M7.5 4l6 6-6 6')+'</button></div>';
   h += '<div class="tiles"><div class="tile hot"><b>'+a.won+'<small>/7</small></b><span>Days won</span></div><div class="tile"><b>'+sign(a.xp)+'</b><span>XP earned</span></div><div class="tile"><b>'+a.morning+'<small>/7</small></b><span>Mornings</span></div></div>';
@@ -1589,10 +1611,12 @@ function viewStats(){
   let rv = '';
   for(let i = 0; i < 8; i++){
     const ws = addDays(weekStart(t), -7*i), sd = state.days[sunOf(ws)], wt = weekTotals(ws);
+    if(sunOf(ws) < state.settings.reviewFrom) break;
     const st = sd && sd.rvDone ? '<span class="s" style="color:var(--green);font-weight:600">Done</span>' : sunOf(ws) > t ? '<span class="s">Sunday</span>' : '<span class="s" style="color:var(--red);font-weight:600">Not done</span>';
     rv += '<button class="li" style="width:100%;text-align:left" data-act="review" data-v="'+ws+'"><div class="grow"><div class="t">'+fmtShort(ws)+' – '+fmtShort(sunOf(ws))+'</div><div class="s">'+wt.won+'/7 won'+(sd && sd.rvFix ? ' · Fix: '+esc(sd.rvFix) : '')+'</div></div>'+st+'</button>';
   }
-  h += card('var(--chalk)', 'Weekly reviews', '', false, '<div class="list">'+rv+'</div>');
+  const firstSun = sunOf(weekStart(state.settings.reviewFrom)) < state.settings.reviewFrom ? addDays(sunOf(weekStart(state.settings.reviewFrom)), 7) : sunOf(weekStart(state.settings.reviewFrom));
+  h += card('var(--chalk)', 'Weekly reviews', '', false, rv ? '<div class="list">'+rv+'</div>' : '<p class="empty">Your first weekly review is on '+fmtLong(firstSun)+'.</p>');
   const ex = Object.keys(state.days).filter(k => state.days[k].gym === 'skip').sort().reverse().slice(0, 8);
   h += card('var(--red)', 'Excuse log', ex.length ? String(ex.length) : '', false, ex.length ? '<div class="list">'+ex.map(k => '<div class="li"><div class="grow"><div class="s">'+fmtLong(k)+'</div><div>'+(state.days[k].excuse ? esc(state.days[k].excuse) : '<span class="empty">No excuse written</span>')+'</div></div></div>').join('')+'</div>' : '<p class="empty">No skipped gym days. Keep it that way.</p>');
   const jr = Object.keys(state.days).filter(k => state.days[k].rating || state.days[k].note).sort().reverse().slice(0, 7);
@@ -1608,6 +1632,7 @@ function viewStats(){
     + '<div class="stepper"><span class="lbl">Weight unit</span><div class="chips">'+['kg','lb'].map(u => '<button class="chip'+(state.settings.unit === u ? ' on' : '')+'" data-act="unit" data-v="'+u+'">'+u+'</button>').join('')+'</div></div>'
     + '<p class="empty">Content counts as loaded when you post, or when you hit the minutes.</p>');
   h += backupCard();
+  h += resetCard();
   h += '<p class="foot">'+(db ? 'Saved to your Claude account. Open this link on any device.' : 'Saved in this browser only.')+'</p>';
   return h;
 }
