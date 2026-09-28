@@ -43,7 +43,7 @@ h1,h2,h3,p{margin:0}
 
 .wrap{max-width:520px;margin:0 auto;display:flex;flex-direction:column;gap:14px;padding-block:12px 8px}
 .brand{display:flex;justify-content:space-between;align-items:center;gap:12px;font-family:var(--label);font-weight:600;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--chalk-3)}
-.brand b{color:var(--chalk);font-weight:700}
+.brand .logo{height:46px;width:auto;display:block;flex:none}
 #sync{letter-spacing:.06em;font-weight:500}
 #sync.bad{color:var(--yellow)}
 #view{display:flex;flex-direction:column;gap:14px}
@@ -313,7 +313,13 @@ details.wtable[open] summary{margin-bottom:6px}
 </head>
 <body>
 <div class="wrap">
-  <div class="brand"><span><b>CP</b></span><span id="sync">Loading…</span></div>
+  <div class="brand"><svg class="logo" viewBox="0 0 92 56" role="img" aria-label="CP">
+    <path d="M42.6,15.8 A19,19 0 1,0 42.6,40.2" style="fill:none;stroke:var(--red);stroke-width:12"/>
+    <path d="M38.4,19.4 A13.2,13.2 0 1,0 38.4,36.6" style="fill:none;stroke:#000;stroke-opacity:.22;stroke-width:1.6"/>
+    <circle cx="28" cy="28" r="5.2" style="fill:var(--steel-hi)"/>
+    <circle cx="28" cy="28" r="2.2" style="fill:var(--floor)"/>
+    <path d="M57,4 H76 A14,14 0 0 1 76,32 H69 V52 H57 Z M69,15 V21 H75 A3,3 0 0 0 75,15 Z" style="fill:var(--chalk);fill-rule:evenodd"/>
+  </svg><span id="sync">Loading…</span></div>
   <main id="view"></main>
 </div>
 <nav class="tabs" aria-label="Sections"><div class="tabs-in" id="tabs"></div></nav>
@@ -348,7 +354,8 @@ const ICON_X = '<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2 2l10 10M
 function defaultSettings(){
   const t = todayKey();
   return {
-    targets:{coding:60, chinese:20, content:30, water:3000, sleep:8, bedtime:'23:30'},
+    targets:{coding:60, chinese:30, content:30, water:3000, sleep:8, bedtime:'23:30'},
+    targetsV:2,
     unit:'kg',
     quotes:['If you need motivation, look at your dad.'],
     morning:[
@@ -370,7 +377,9 @@ function defaultSettings(){
 function normSettings(s){
   const d = defaultSettings(); s = s || {};
   return {
-    targets: Object.assign(d.targets, s.targets || {}),
+    // targetsV 2 raised the Chinese goal from 20 to 30 minutes; move the old default up once.
+    targets: (t => { if((s.targetsV || 1) < 2 && t.chinese === 20) t.chinese = 30; return t; })(Object.assign(d.targets, s.targets || {})),
+    targetsV: 2,
     unit: s.unit === 'lb' ? 'lb' : 'kg',
     morning: Array.isArray(s.morning) ? s.morning : d.morning,
     goalWeight: typeof s.goalWeight === 'number' && s.goalWeight > 0 ? s.goalWeight : null,
