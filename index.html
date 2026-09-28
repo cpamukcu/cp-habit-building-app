@@ -201,6 +201,12 @@ img.broken{visibility:hidden}
 .wlog{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 details.wtable summary{cursor:pointer;font-family:var(--label);font-weight:600;font-size:14px;letter-spacing:.08em;text-transform:uppercase;color:var(--chalk-2);padding-block:4px}
 details.wtable[open] summary{margin-bottom:6px}
+.quote{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:14px;background:var(--iron);border:1px solid var(--iron-3)}
+.quote blockquote{margin:0;font-family:var(--label);font-weight:600;font-size:22px;line-height:1.2;letter-spacing:.01em;text-wrap:balance;color:var(--chalk)}
+.quote blockquote.mine::before{content:"Your words";display:block;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--red);margin-bottom:6px}
+.quote blockquote.hard{color:var(--red)}
+.quote-bar{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.quote-bar .go{--c:var(--chalk-3);font-size:13px}
 .sleep-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .sleep-row input{min-height:44px}
 .qual{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
@@ -344,6 +350,7 @@ function defaultSettings(){
   return {
     targets:{coding:60, chinese:20, content:30, water:3000, sleep:8, bedtime:'23:30'},
     unit:'kg',
+    quotes:['If you need motivation, look at your dad.'],
     morning:[
       {id:'m1', name:'Up on the first alarm'},
       {id:'m2', name:'Drink 500 ml water'},
@@ -367,6 +374,7 @@ function normSettings(s){
     unit: s.unit === 'lb' ? 'lb' : 'kg',
     morning: Array.isArray(s.morning) ? s.morning : d.morning,
     goalWeight: typeof s.goalWeight === 'number' && s.goalWeight > 0 ? s.goalWeight : null,
+    quotes: Array.isArray(s.quotes) ? s.quotes.filter(q => typeof q === 'string') : d.quotes,
     quits: Array.isArray(s.quits) ? s.quits : d.quits
   };
 }
@@ -440,6 +448,98 @@ async function initDb(){
     }
     saveCache(); requestRender();
   }, () => setSync('error'));
+}
+
+/* ---------- backup: export & import ---------- */
+let downloads = null;
+const LS_BACKUP = 'fourplates.lastBackup';
+const inClaude = !!(window.claude && window.claude.use);
+async function initDownloads(){
+  try{ downloads = inClaude ? await window.claude.use('downloads') : null; }catch(e){ downloads = null; }
+  requestRender();
+}
+function lastBackup(){ try{ return localStorage.getItem(LS_BACKUP); }catch(e){ return null; } }
+function markBackup(){ try{ localStorage.setItem(LS_BACKUP, todayKey()); }catch(e){} }
+function backupJSON(){
+  return JSON.stringify({app:'CP', version:1, exportedAt:new Date().toISOString(), settings:state.settings, days:state.days});
+}
+async function exportBackup(){
+  const name = 'cp-backup-'+todayKey()+'.json', data = backupJSON();
+  if(downloads){
+    try{ await downloads.save({filename:name, data}); markBackup(); toast('Backup saved.'); render(); }
+    catch(e){ if(!(e && e.code === 'declined')) toast('Couldn\'t save the file. Use Copy backup instead.'); }
+    return;
+  }
+  if(inClaude){ toast('File saving isn\'t available here. Use Copy backup instead.'); return; }
+  try{
+    const url = URL.createObjectURL(new Blob([data], {type:'application/json'}));
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    markBackup(); toast('Backup downloaded.'); render();
+  }catch(e){ toast('Couldn\'t download. Use Copy backup instead.'); }
+}
+function copyBackup(){
+  const data = backupJSON();
+  const done = () => { markBackup(); toast('Backup copied. Paste it somewhere safe, like Notes.'); render(); };
+  const fallback = () => { state.showBackupText = true; render(); setTimeout(() => { const t = $('#backup-text'); if(t){ t.focus(); t.select(); } }, 0); };
+  try{ navigator.clipboard.writeText(data).then(done, fallback); }catch(e){ fallback(); }
+}
+function parseBackup(text){
+  let b; try{ b = JSON.parse(text); }catch(e){ return {error:'That isn\'t a CP backup file.'}; }
+  if(!b || typeof b !== 'object' || !b.days || typeof b.days !== 'object' || Array.isArray(b.days) || !b.settings || typeof b.settings !== 'object') return {error:'That isn\'t a CP backup file.'};
+  const days = {};
+  for(const [k, d] of Object.entries(b.days)){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(k) || !d || typeof d !== 'object' || Array.isArray(d)) continue;
+    days[k] = Object.assign({}, d, {date:k});
+  }
+  return {backup:{settings:b.settings, days, exportedAt:b.exportedAt || null}};
+}
+function readImportFile(file){
+  const r = new FileReader();
+  r.onload = () => { const p = parseBackup(String(r.result || '')); if(p.error){ toast(p.error); return; } state.pendingImport = p.backup; render(); };
+  r.onerror = () => toast('Couldn\'t read that file.');
+  r.readAsText(file);
+}
+async function applyImport(b){
+  const oldKeys = Object.keys(state.days);
+  state.settings = normSettings(b.settings);
+  state.days = b.days;
+  state.pendingImport = null; state.showBackupText = false;
+  saveCache();
+  const n = Object.keys(b.days).length;
+  if(db){
+    const keys = Object.keys(b.days), gone = oldKeys.filter(k => !b.days[k]);
+    dirty.add('app/settings'); keys.concat(gone).forEach(k => dirty.add('days/'+k));
+    setSync('saving'); render();
+    let failed = false;
+    try{ await db.doc('app/settings').set(clone(state.settings)); }catch(e){ failed = true; }
+    dirty.delete('app/settings');
+    const run = async (list, fn) => { for(let i = 0; i < list.length; i += 8) await Promise.all(list.slice(i, i+8).map(k => fn(k).catch(() => { failed = true; }).then(() => dirty.delete('days/'+k)))); };
+    await run(keys, k => db.doc('days/'+k).set(clone(state.days[k])));
+    await run(gone, k => db.doc('days/'+k).delete());
+    setSync(failed ? 'error' : 'synced');
+    if(failed){ toast('Restored on this device, but some days didn\'t sync. Reopen the app to retry.'); render(); return; }
+  }
+  toast('Backup restored: '+n+' day'+(n === 1 ? '' : 's')+'.'); render();
+}
+function backupCard(){
+  const lb = lastBackup(), t = todayKey(), ago = lb ? daysBetween(lb, t) : null, nDays = Object.keys(state.days).length;
+  let b = '<p>'+(lb ? 'Last backup on this device: <b>'+(ago === 0 ? 'today' : ago === 1 ? 'yesterday' : ago+' days ago')+'</b>.' : '<span class="note-bad">No backup yet.</span>')
+    + (ago == null || ago > 7 ? ' Back up once a week so you never lose your streak.' : '')+'</p>';
+  b += '<div class="row2"><button class="mini on" data-act="export"'+(inClaude && !downloads ? ' disabled' : '')+'>Save backup file</button><button class="mini" data-act="copy-backup">Copy backup</button></div>';
+  if(state.showBackupText) b += '<label class="fld"><span>Copy all of this and keep it somewhere safe.</span><textarea id="backup-text" rows="4" readonly>'+esc(backupJSON())+'</textarea></label>';
+  const pi = state.pendingImport;
+  if(pi){
+    const n = Object.keys(pi.days).length, when = pi.exportedAt ? new Date(pi.exportedAt).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : 'an unknown date';
+    b += '<div class="card" style="--c:var(--red);background:var(--iron-2)"><p><b>Restore backup from '+esc(when)+'?</b> It has '+n+' logged day'+(n === 1 ? '' : 's')+'. This replaces everything in the app now ('+nDays+' day'+(nDays === 1 ? '' : 's')+').</p>'
+      + '<div class="row2"><button class="mini danger" data-act="import-yes">Replace my data</button><button class="mini" data-act="import-no">Cancel</button></div></div>';
+  } else {
+    b += '<label class="mini ghost upload" style="text-align:center">Restore from backup file<input id="import-in" type="file" accept="application/json,.json,text/plain" hidden></label>'
+      + '<details class="wtable"><summary>Paste backup text instead</summary><div class="checks"><textarea id="import-text" rows="3" placeholder="Paste your backup here"></textarea><button class="mini" data-act="import-paste">Check backup</button></div></details>';
+  }
+  b += '<p class="empty">Backups include all your logs, settings, weight and sleep. Progress photos aren\'t inside the file.</p>';
+  return card('var(--chalk)', 'Backup', '', false, b);
 }
 
 let assets = null, assetsChecked = false;
@@ -744,6 +844,14 @@ function doAct(a, v, el){
     case 'morn-edit': state.editMorning = !state.editMorning; break;
     case 'morn-del': mutS(s => { s.morning = s.morning.filter(m => m.id !== v); }); break;
     case 'unit': mutS(s => { s.unit = v; }); break;
+    case 'quote-next': state.quoteOffset = (state.quoteOffset || 0) + 1; break;
+    case 'quote-edit': state.editQuotes = !state.editQuotes; break;
+    case 'quote-del': mutS(s => { s.quotes.splice(Number(v), 1); }); break;
+    case 'export': exportBackup(); return;
+    case 'copy-backup': copyBackup(); return;
+    case 'import-paste': { const t = $('#import-text'), p = parseBackup(t ? t.value : ''); if(p.error){ toast(p.error); return; } state.pendingImport = p.backup; break; }
+    case 'import-no': state.pendingImport = null; break;
+    case 'import-yes': if(state.pendingImport) applyImport(state.pendingImport); return;
   }
   render();
 }
@@ -754,7 +862,7 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target.dataset.form, lvBefore = levelOf(xpLedger().total).level;
-  if(f === 'lift') addLift(); else if(f === 'word') addWord(); else if(f === 'quit') addQuit(); else if(f === 'morn') addMorning();
+  if(f === 'lift') addLift(); else if(f === 'word') addWord(); else if(f === 'quit') addQuit(); else if(f === 'morn') addMorning(); else if(f === 'quote') addQuote();
   render();
   const lvAfter = levelOf(xpLedger().total).level;
   if(lvAfter > lvBefore) toast('Level up! LVL '+lvAfter+' · '+rankOf(lvAfter));
@@ -767,6 +875,7 @@ document.addEventListener('input', e => {
   mut(t.dataset.k || state.date, d => { d[f] = t.value.slice(0, 1000); });
 });
 document.addEventListener('change', e => {
+  if(e.target.id === 'import-in'){ const file = e.target.files && e.target.files[0]; e.target.value = ''; if(file) readImportFile(file); return; }
   if(e.target.id === 'photo-in'){ const file = e.target.files && e.target.files[0]; e.target.value = ''; if(file) uploadPhoto(file); return; }
   if(e.target.dataset.field === 'weight'){ render(); return; }
   if(e.target.dataset.field === 'sleepBed' || e.target.dataset.field === 'sleepWake'){
@@ -847,6 +956,7 @@ function viewToday(){
   const k = state.date, d = getDay(k), p = prog(d), t = state.settings.targets, qs = state.settings.quits;
   const loaded = PILLARS.filter(x => p[x.k] >= 1).length;
   let h = dateHeader();
+  h += quoteCard(d, k);
   h += '<section class="hero">' + levelStrip(k) + barbell(d)
     + '<div class="hero-row"><div class="score"><b>'+score(d)+'</b><span>/100</span></div>'
     + '<div class="verdict">'+(won(d) ? '<span class="won">Day won</span>' : loaded+' of 4 plates loaded'+(state.settings.morning.length && !mornFull(d) ? '<br>Morning '+mornDone(d)+' of '+state.settings.morning.length : ''))+(qs.length ? '<br>'+cleanCount(d)+' of '+qs.length+' clean' : '')+'</div>'
@@ -904,6 +1014,73 @@ function levelStrip(k){
     + '<button class="lvl-today'+(dx < 0 ? ' neg' : '')+'" data-act="tab" data-v="stats">'+(dx >= 0 ? '+' : '')+dx+' XP '+(k === todayKey() ? 'today' : 'this day')+'</button></div>'
     + '<div class="xpbar" role="progressbar" aria-valuemin="0" aria-valuemax="'+lv.need+'" aria-valuenow="'+lv.into+'"><i style="width:'+(lv.into/lv.need*100)+'%"></i></div>'
     + '<div class="lvl-sub">'+lv.into+' / '+lv.need+' XP · '+(lv.need - lv.into)+' to LVL '+(lv.level+1)+(nr ? ' · '+nr[1]+' at LVL '+nr[0] : '')+'</div></div>';
+}
+/* ---------- motivation ---------- */
+const QUOTES = [
+  'Nobody is coming to do the reps for you.',
+  'The version of you that you want is built on days like today.',
+  'Motivation fades. Plates don\'t load themselves.',
+  'You don\'t need to feel like it. You need to start.',
+  'Every skipped day is a vote for the old you.',
+  'Win the morning, win the day.',
+  'Small reps, every day, for years. That\'s the whole secret.',
+  'Your future self is watching. Make them proud.',
+  'Comfort is the enemy of the body you want.',
+  'Tired is a feeling, not a reason.',
+  'The streak doesn\'t care about your excuses.',
+  'Do it tired. Do it bored. Just do it.',
+  'One more rep. One more word. One more post.',
+  'You said you would. So do it.',
+  'Hard now, easy later. Easy now, hard later.',
+  'Scrolling won\'t build anything. You will.',
+  'Be the person your family brags about.',
+  'Your dad never got tired of showing up. Neither do you.',
+  'Nobody remembers the days you rested for no reason.',
+  'Built, not born.',
+  'The bar is heavy. So is regret.',
+  'Show up ugly. Show up anyway.',
+  'Ten minutes of Chinese beats zero minutes of perfect.',
+  'Ship it. Then ship the next one.',
+  'Don\'t break the chain.',
+  'Future you is counting on present you.',
+  'Earn your sleep.',
+  'Clean today is the only day that counts.',
+  'Make them wonder how you did it.',
+  'Your excuses have never lifted a single plate.'
+];
+const HARD_QUOTES = [
+  'You slipped. Fine. The next hour decides who you are.',
+  'A bad day is one day. Don\'t make it two.',
+  'Reset the counter, not your standards.',
+  'Get back under the bar. Now.',
+  'Falling isn\'t the problem. Staying down is.'
+];
+function hashKey(s){ let h = 0; for(let i = 0; i < s.length; i++) h = (h*31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
+function quoteCard(d, k){
+  const mine = state.settings.quotes, off = state.quoteOffset || 0;
+  if(state.editQuotes){
+    return '<section class="quote"><div class="quote-bar"><span class="lbl">Your motivation lines</span><button class="go" data-act="quote-edit">Done</button></div>'
+      + '<div class="checks">'+(mine.length ? mine.map((q, i) => '<div class="edit-row"><span class="t">'+esc(q)+'</span><button class="x" data-act="quote-del" data-v="'+i+'" aria-label="Remove line">'+ICON_X+'</button></div>').join('') : '<p class="empty">No lines of your own yet.</p>')+'</div>'
+      + '<form class="add-row" data-form="quote"><input id="q-line" placeholder="e.g. Remember why you started." maxlength="140" autocomplete="off"><button class="mini on" style="--c:var(--chalk)" type="submit">Add</button></form>'
+      + '<p class="empty">Your lines show up more often than the built-in ones.</p></section>';
+  }
+  const hard = slipped(d) || d.gym === 'skip';
+  // Your own lines are spread through the list, one after every four built-in lines.
+  let pool;
+  if(hard) pool = HARD_QUOTES.map(t => ({t, mine:false}));
+  else {
+    pool = []; let m = 0;
+    QUOTES.forEach((t, i) => { pool.push({t, mine:false}); if(mine.length && i % 4 === 3) pool.push({t:mine[m++ % mine.length], mine:true}); });
+    while(m < mine.length) pool.push({t:mine[m++], mine:true});
+  }
+  const q = pool[(hashKey(k) + off) % pool.length];
+  return '<section class="quote"><blockquote class="'+(hard ? 'hard' : q.mine ? 'mine' : '')+'">'+esc(q.t)+'</blockquote>'
+    + '<div class="quote-bar"><button class="go" data-act="quote-next">Another one ↻</button><button class="go" data-act="quote-edit">Add your own</button></div></section>';
+}
+function addQuote(){
+  const t = $('#q-line').value.trim(); if(!t) return;
+  mutS(s => { s.quotes.push(t.slice(0, 140)); });
+  setTimeout(() => { const el = $('#q-line'); if(el) el.focus(); }, 0);
 }
 function sleepCard(d){
   const t = state.settings.targets, m = sleepMins(d), bt = t.bedtime;
@@ -1421,6 +1598,7 @@ function viewStats(){
     + '<label class="fld"><span>Bedtime</span><input id="t-bedtime" type="time" data-target="bedtime" value="'+esc(tg.bedtime)+'"></label></div>'
     + '<div class="stepper"><span class="lbl">Weight unit</span><div class="chips">'+['kg','lb'].map(u => '<button class="chip'+(state.settings.unit === u ? ' on' : '')+'" data-act="unit" data-v="'+u+'">'+u+'</button>').join('')+'</div></div>'
     + '<p class="empty">Content counts as loaded when you post, or when you hit the minutes.</p>');
+  h += backupCard();
   h += '<p class="foot">'+(db ? 'Saved to your Claude account. Open this link on any device.' : 'Saved in this browser only.')+'</p>';
   return h;
 }
@@ -1447,6 +1625,7 @@ setSync('local');
 render();
 initDb();
 initAssets();
+initDownloads();
 })();
 </script>
 </body>
